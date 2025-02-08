@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 - 2021 Justas Masiulis
+ * Copyright 2017 - 2025 Justas Masiulis, klop
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,12 +25,35 @@
 #error Unsupported platform
 #endif
 
+#if defined(__clang__) || defined(__GNUC__)
+    #define __cppversion __cplusplus
+#elif defined(_MSC_VER)
+    #define __cppversion _MSVC_LANG
+#else
+    #error Unsupported Compiler
+#endif
+
+
+#if __cppversion >= 201703L
+    #define __cpp17OrGreater
+#elif __cppversion >= 201402L
+    #define __cpp14OrGreater
+#else
+    #error Unsupported c++11 or lower
+#endif
+
 #include <cstdint>
 #include <cstddef>
 #include <utility>
 #include <type_traits>
 
-#define xorstr(str) ::jm::xor_string([]() { return str; }, std::integral_constant<std::size_t, sizeof(str) / sizeof(*str)>{}, std::make_index_sequence<::jm::detail::_buffer_size<sizeof(str)>()>{})
+#if defined(__cpp17OrGreater)
+    #define xorstr(str) ::jm::xor_string([]() { return str; }, std::integral_constant<std::size_t, sizeof(str) / sizeof(*str)>{}, std::make_index_sequence<::jm::detail::_buffer_size<sizeof(str)>()>{})
+#elif defined(__cpp14OrGreater)
+    #define xorstr(str) ::jm::make_xorstring([]() { return str; }, std::make_index_sequence<sizeof(str) / sizeof(*str)>{}, std::make_index_sequence<::jm::detail::_buffer_size<sizeof(str)>()>{})
+
+#endif
+
 #define xorstr_(str) xorstr(str).crypt_get()
 
 #ifdef _MSC_VER
@@ -98,6 +121,7 @@ namespace jm {
 
     } // namespace detail
 
+#if defined(__cpp17OrGreater)
     template<class CharT, std::size_t Size, class Keys, class Indices>
     class xor_string;
 
@@ -236,6 +260,120 @@ namespace jm {
                 Size,
                 std::integer_sequence<std::uint64_t, detail::key8<Indices>()...>,
                 std::index_sequence<Indices...>>;
+
+#elif defined(__cpp14OrGreater)
+    template<class _Ty, class _Seq, class _Keys, class _Indices>
+    class xor_string;
+
+    template<class _Ty, std::size_t... _Seq, std::uint64_t... _Keys, std::size_t... _Indices>
+    class xor_string<_Ty, std::integer_sequence<std::size_t, _Seq...>, std::integer_sequence<std::uint64_t, _Keys...>, std::index_sequence<_Indices...>> {
+    public:
+        using value_type = _Ty;
+        using size_type = std::size_t;
+        using key_type = std::uint64_t;
+        using pointer = _Ty*;
+        using const_pointer = const _Ty*;
+    private:
+        value_type _storage[sizeof...(_Indices) * sizeof(key_type) / sizeof(value_type)];
+
+    public:
+
+        template<class L>
+        XORSTR_FORCEINLINE constexpr xor_string(L l)
+            : _storage{ load_xor_str1(l()[_Seq], _Seq)... }
+        {}
+
+        XORSTR_FORCEINLINE constexpr value_type load_xor_str1(value_type ch, std::size_t i) const
+        { 
+            key_type keys[]{ detail::load_from_reg(_Keys)... };
+
+            using cast_type = typename std::make_unsigned<value_type>::type;
+            constexpr auto value_size = sizeof(value_type);
+            constexpr auto idx_offset = sizeof(key_type) / value_size;
+
+            key_type value = keys[i / idx_offset];
+            return ch ^ (cast_type)(value >> (i % idx_offset) * 8 * value_size);
+        }
+
+        XORSTR_FORCEINLINE constexpr size_type size() const noexcept
+        {
+            return sizeof...(_Seq) - 1;
+        }
+
+        XORSTR_FORCEINLINE const_pointer get() const noexcept
+        {
+            return reinterpret_cast<const_pointer>(_storage);
+        }
+
+        XORSTR_FORCEINLINE pointer get() noexcept
+        {
+            return reinterpret_cast<pointer>(_storage);
+        }
+
+        XORSTR_FORCEINLINE pointer crypt_get() noexcept
+        {
+#if defined(__clang__)
+            key_type arr[]{ detail::load_from_reg(Keys)... };
+            key_type* keys =
+                (key_type*) detail::load_from_reg((key_type)arr);
+#else
+            key_type keys[]{ detail::load_from_reg(_Keys)... };
+#endif
+
+#if defined(_M_ARM64) || defined(__aarch64__) || defined(_M_ARM) || defined(__arm__)
+#if defined(__clang__)
+            #error Unsupported now
+#else // GCC, MSVC
+            #error Unsupported now
+#endif
+#elif !defined(JM_XORSTR_DISABLE_AVX_INTRINSICS)
+            constexpr auto _bits = 32;
+            for (size_t i = 0; i < sizeof...(_Indices) / (_bits / sizeof(key_type)); i++)
+            {
+                _mm256_store_si256(
+                    reinterpret_cast<__m256i*>(_storage) + i,
+                    _mm256_xor_si256(
+                        _mm256_load_si256(reinterpret_cast<const __m256i*>(_storage) + i),
+                        _mm256_load_si256(reinterpret_cast<const __m256i*>(keys) + i)));
+            }
+
+            if (sizeof(_storage) % _bits != 0)
+                _mm_store_si128(
+                    reinterpret_cast<__m128i*>((key_type*)_storage + sizeof...(_Keys) - 2),
+                    _mm_xor_si128(_mm_load_si128(reinterpret_cast<const __m128i*>((key_type*)_storage + sizeof...(_Keys) - 2)),
+                        _mm_load_si128(reinterpret_cast<const __m128i*>(keys + sizeof...(_Keys) - 2))));
+#else
+            for (size_t i = 0; i < sizeof...(_Indices) / (16 / sizeof(key_type)); i++)
+            {
+                _mm_store_si128(
+                    reinterpret_cast<__m128i*>(_storage) + i,
+                    _mm_xor_si128(_mm_load_si128(reinterpret_cast<const __m128i*>(_storage) + i),
+                        _mm_load_si128(reinterpret_cast<const __m128i*>(keys) + i)));
+            }
+#endif
+
+            return (pointer)(_storage);
+        }
+    };
+
+
+    template <class L, std::size_t... _Seq, std::size_t... Indices>
+    xor_string<
+        std::remove_const_t<std::remove_reference_t<decltype(std::declval<L>()()[0])>>,
+        std::index_sequence<_Seq...>,
+        std::integer_sequence<std::uint64_t, detail::key8<Indices>()...>,
+        std::index_sequence<Indices...>
+    > constexpr make_xorstring(L l, std::index_sequence<_Seq...>, std::index_sequence<Indices...>) {
+
+        return xor_string<
+            std::remove_const_t<std::remove_reference_t<decltype(l()[0])>>,
+            std::index_sequence<_Seq...>,
+            std::integer_sequence<std::uint64_t, detail::key8<Indices>()...>,
+            std::index_sequence<Indices...>
+        >(l);
+    }
+
+#endif
 
 } // namespace jm
 

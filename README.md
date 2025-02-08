@@ -1,5 +1,5 @@
 ## xorstr
-A heavily vectorized c++17 compile time string encryption.
+A heavily vectorized c++14(limited),c++17 compile time string encryption.
 
 # quick example
 ```cpp
