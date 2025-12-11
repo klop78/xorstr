@@ -10,6 +10,6 @@
 
 int main()
 {
-    wprintf_s(xorstr_(L"klop klop klop klop klop klop"));
+    wprintf_s(xorstr_(L"0123456789abcdef"));
 }
 

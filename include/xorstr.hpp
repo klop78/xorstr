@@ -274,6 +274,139 @@ namespace jm {
         using pointer = _Ty*;
         using const_pointer = const _Ty*;
     private:
+
+#if defined(_M_ARM64) || defined(__aarch64__) || defined(_M_ARM) || defined(__arm__)
+#if defined(__clang__)
+
+        template<size_t I, size_t MaxBlocks>
+        struct crypt_neon_block {
+            static XORSTR_FORCEINLINE void execute(value_type* storage, key_type* keys) noexcept {
+                static_assert(I < MaxBlocks, "Index out of bounds");
+                vst1q_u64(
+                    reinterpret_cast<uint64_t*>(storage) + I * 2,
+                    veorq_u64(
+                        __builtin_neon_vld1q_v(reinterpret_cast<const uint64_t*>(storage) + I * 2, 51),
+                        __builtin_neon_vld1q_v(reinterpret_cast<const uint64_t*>(keys) + I * 2, 51)));
+            }
+        };
+
+#else // GCC, MSVC
+        template<size_t I, size_t MaxBlocks>
+        struct crypt_neon_block {
+            static XORSTR_FORCEINLINE void execute(value_type* storage, key_type* keys) noexcept {
+                static_assert(I < MaxBlocks, "Index out of bounds");
+                vst1q_u64(
+                    reinterpret_cast<uint64_t*>(storage) + I * 2,
+                    veorq_u64(
+                        vld1q_u64(reinterpret_cast<const uint64_t*>(storage) + I * 2),
+                        vld1q_u64(reinterpret_cast<const uint64_t*>(keys) + I * 2)));
+            }
+        };
+#endif
+
+        template<size_t I, size_t MaxBlocks>
+        XORSTR_FORCEINLINE typename std::enable_if<(I < MaxBlocks), void>::type
+            crypt_neon_single(key_type* keys) noexcept {
+            crypt_neon_block<I, MaxBlocks>::execute(_storage, keys);
+        }
+
+        template<size_t I, size_t MaxBlocks>
+        XORSTR_FORCEINLINE typename std::enable_if<(I >= MaxBlocks), void>::type
+            crypt_neon_single(key_type* keys) noexcept {
+            // Do nothing
+        }
+
+       
+        template<size_t... Is>
+        XORSTR_FORCEINLINE void crypt_neon_impl(key_type* keys, std::index_sequence<Is...>) noexcept {
+            constexpr size_t max_blocks = sizeof(_storage) / 16;
+            int dummy[] = { 0, (crypt_neon_single<Is, max_blocks>(keys), 0)... };
+            (void)dummy; // suppress unused variable warning
+        }
+
+#else
+        template<size_t I, size_t MaxBlocks>
+        struct crypt_avx_block {
+            static XORSTR_FORCEINLINE void execute(value_type* storage, key_type* keys) noexcept {
+                static_assert(I < MaxBlocks, "Index out of bounds");
+                _mm256_store_si256(
+                    reinterpret_cast<__m256i*>(storage) + I,
+                    _mm256_xor_si256(
+                        _mm256_load_si256(reinterpret_cast<const __m256i*>(storage) + I),
+                        _mm256_load_si256(reinterpret_cast<const __m256i*>(keys) + I)));
+            }
+        };
+
+        template<size_t I, size_t MaxBlocks>
+        struct crypt_sse_block {
+            static XORSTR_FORCEINLINE void execute(value_type* storage, key_type* keys) noexcept {
+                static_assert(I < MaxBlocks, "Index out of bounds");
+                _mm_store_si128(
+                    reinterpret_cast<__m128i*>(storage) + I,
+                    _mm_xor_si128(
+                        _mm_load_si128(reinterpret_cast<const __m128i*>(storage) + I),
+                        _mm_load_si128(reinterpret_cast<const __m128i*>(keys) + I)));
+            }
+        };
+
+        template<size_t I, size_t MaxBlocks>
+        XORSTR_FORCEINLINE typename std::enable_if<(I < MaxBlocks), void>::type
+            crypt_avx_single(key_type* keys) noexcept {
+            crypt_avx_block<I, MaxBlocks>::execute(_storage, keys);
+        }
+
+        template<size_t I, size_t MaxBlocks>
+        XORSTR_FORCEINLINE typename std::enable_if<(I >= MaxBlocks), void>::type
+            crypt_avx_single(key_type* keys) noexcept {
+            // Do nothing
+        }
+
+        template<size_t I, size_t MaxBlocks>
+        XORSTR_FORCEINLINE typename std::enable_if<(I < MaxBlocks), void>::type
+            crypt_sse_single(key_type* keys) noexcept {
+            crypt_sse_block<I, MaxBlocks>::execute(_storage, keys);
+        }
+
+        template<size_t I, size_t MaxBlocks>
+        XORSTR_FORCEINLINE typename std::enable_if<(I >= MaxBlocks), void>::type
+            crypt_sse_single(key_type* keys) noexcept {
+            // Do nothing
+        }
+
+        // Parameter pack expansion using dummy array trick
+        template<size_t... Is>
+        XORSTR_FORCEINLINE void crypt_avx_impl(key_type* keys, std::index_sequence<Is...>) noexcept {
+            constexpr size_t max_blocks = sizeof(_storage) / 32;
+            int dummy[] = { 0, (crypt_avx_single<Is, max_blocks>(keys), 0)... };
+            (void)dummy; // suppress unused variable warning
+
+            constexpr bool needs_sse_cleanup = (sizeof(_storage) % 32 != 0);
+            crypt_sse_cleanup(keys, std::integral_constant<bool, needs_sse_cleanup>{});
+        }
+
+        template<size_t... Is>
+        XORSTR_FORCEINLINE void crypt_sse_impl(key_type* keys, std::index_sequence<Is...>) noexcept {
+            constexpr size_t max_blocks = sizeof(_storage) / 16;
+            int dummy[] = { 0, (crypt_sse_single<Is, max_blocks>(keys), 0)... };
+            (void)dummy; // suppress unused variable warning
+        }
+
+        // Helper for SSE cleanup - C++14 way using tag dispatch
+        XORSTR_FORCEINLINE void crypt_sse_cleanup(key_type* keys, std::true_type) noexcept {
+            constexpr auto aaa = sizeof...(_Keys);
+            _mm_store_si128(
+                reinterpret_cast<__m128i*>((key_type*)_storage + sizeof...(_Keys) - 2),
+                _mm_xor_si128(
+                    _mm_load_si128(reinterpret_cast<const __m128i*>((key_type*)_storage + sizeof...(_Keys) - 2)),
+                    _mm_load_si128(reinterpret_cast<const __m128i*>(keys + sizeof...(_Keys) - 2))));
+        }
+
+        XORSTR_FORCEINLINE void crypt_sse_cleanup(key_type* keys, std::false_type) noexcept {
+            // Do nothing when cleanup is not needed
+        }
+#endif
+        
+
         value_type _storage[sizeof...(_Indices) * sizeof(key_type) / sizeof(value_type)];
 
     public:
@@ -313,7 +446,7 @@ namespace jm {
         XORSTR_FORCEINLINE pointer crypt_get() noexcept
         {
 #if defined(__clang__)
-            key_type arr[]{ detail::load_from_reg(Keys)... };
+            key_type arr[]{ detail::load_from_reg(_Keys)... };
             key_type* keys =
                 (key_type*) detail::load_from_reg((key_type)arr);
 #else
@@ -322,34 +455,20 @@ namespace jm {
 
 #if defined(_M_ARM64) || defined(__aarch64__) || defined(_M_ARM) || defined(__arm__)
 #if defined(__clang__)
-            #error Unsupported now
+            constexpr size_t max_blocks = sizeof(_storage) / 16;
+            crypt_neon_impl(keys, std::make_index_sequence<max_blocks>{});
 #else // GCC, MSVC
-            #error Unsupported now
+            constexpr size_t max_blocks = sizeof(_storage) / 16;
+            crypt_neon_impl(keys, std::make_index_sequence<max_blocks>{});
 #endif
 #elif !defined(JM_XORSTR_DISABLE_AVX_INTRINSICS)
-            constexpr auto _bits = 32;
-            for (size_t i = 0; i < sizeof...(_Indices) / (_bits / sizeof(key_type)); i++)
-            {
-                _mm256_store_si256(
-                    reinterpret_cast<__m256i*>(_storage) + i,
-                    _mm256_xor_si256(
-                        _mm256_load_si256(reinterpret_cast<const __m256i*>(_storage) + i),
-                        _mm256_load_si256(reinterpret_cast<const __m256i*>(keys) + i)));
-            }
-
-            if (sizeof(_storage) % _bits != 0)
-                _mm_store_si128(
-                    reinterpret_cast<__m128i*>((key_type*)_storage + sizeof...(_Keys) - 2),
-                    _mm_xor_si128(_mm_load_si128(reinterpret_cast<const __m128i*>((key_type*)_storage + sizeof...(_Keys) - 2)),
-                        _mm_load_si128(reinterpret_cast<const __m128i*>(keys + sizeof...(_Keys) - 2))));
+            // AVX blocks (32 bytes each)
+            constexpr size_t max_blocks = sizeof(_storage) / 32;
+            crypt_avx_impl(keys, std::make_index_sequence<max_blocks>{});
 #else
-            for (size_t i = 0; i < sizeof...(_Indices) / (16 / sizeof(key_type)); i++)
-            {
-                _mm_store_si128(
-                    reinterpret_cast<__m128i*>(_storage) + i,
-                    _mm_xor_si128(_mm_load_si128(reinterpret_cast<const __m128i*>(_storage) + i),
-                        _mm_load_si128(reinterpret_cast<const __m128i*>(keys) + i)));
-            }
+            // SSE blocks (16 bytes each)
+            constexpr size_t max_blocks = sizeof(_storage) / 16;
+            crypt_sse_impl(keys, std::make_index_sequence<max_blocks>{});
 #endif
 
             return (pointer)(_storage);
