@@ -1,5 +1,6 @@
 #include <jni.h>
 #include <string>
+#define JM_XORSTR_DISABLE_AVX_INTRINSICS
 #include "../../../../../../../include/xorstr.hpp"
 
 extern "C"
